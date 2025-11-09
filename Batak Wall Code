@@ -1,0 +1,258 @@
+#include <EEPROM.h>
+
+// ========================
+// CONFIGURATION
+// ========================
+
+// Shift register pins
+const int dataPin  = 4;  // SER
+const int clockPin = 5;  // SRCLK
+const int latchPin = 6;  // RCLK
+
+// Direct LEDs pins (4 LEDs)
+const int directLEDs[4] = {7, 8, 9, 10};
+
+// Buttons (12 total)
+const int buttonPins[12] = {2, 3, A0, A1, A2, A3, 11, 12, A4, A5, 0, 1}; // adjust as needed
+
+// Game Modes
+enum GameMode { MODE_NONE, MODE_30SEC, MODE_60SEC, MODE_SUDDEN_DEATH, MODE_SEQUENCE };
+
+// ========================
+// GAME STATE VARIABLES
+// ========================
+GameMode selectedMode = MODE_NONE;
+bool playing = false;
+int score = 0;
+int highScore = 0;
+int activeIndex = -1;
+unsigned long lastTriggerTime = 0;
+unsigned long gameStartTime = 0;
+const unsigned long cooldown = 0;
+
+// Sequence mode
+const int maxSequenceLength = 10;
+int sequence[maxSequenceLength];
+int sequenceIndex = 0;
+int playerStep = 0;
+bool waitingForInput = false;
+
+// ========================
+// SETUP
+// ========================
+void setup() {
+  // Buttons
+  for (int i = 0; i < 12; i++) pinMode(buttonPins[i], INPUT_PULLUP);
+
+  // Direct LEDs
+  for (int i = 0; i < 4; i++) pinMode(directLEDs[i], OUTPUT);
+
+  // Shift register pins
+  pinMode(dataPin, OUTPUT);
+  pinMode(clockPin, OUTPUT);
+  pinMode(latchPin, OUTPUT);
+
+  Serial.begin(9600);
+  randomSeed(analogRead(A5));
+
+  // Load high score
+  highScore = EEPROM.read(0) | (EEPROM.read(1) << 8);
+
+  clearAllLEDs();
+  showStandbyScreen();
+}
+
+// ========================
+// LOOP
+// ========================
+void loop() {
+  unsigned long now = millis();
+
+  // Wait for mode selection
+  if (!playing) {
+    if (digitalRead(buttonPins[0]) == LOW) { selectedMode = MODE_30SEC; startGame(); }
+    else if (digitalRead(buttonPins[1]) == LOW) { selectedMode = MODE_60SEC; startGame(); }
+    else if (digitalRead(buttonPins[2]) == LOW) { selectedMode = MODE_SUDDEN_DEATH; startGame(); }
+    else if (digitalRead(buttonPins[3]) == LOW) { selectedMode = MODE_SEQUENCE; startGame(); }
+    return;
+  }
+
+  // End timed modes
+  if ((selectedMode == MODE_30SEC && now - gameStartTime > 30000) ||
+      (selectedMode == MODE_60SEC && now - gameStartTime > 60000)) {
+    endGame(); return;
+  }
+
+  // ========================
+  // GAME LOGIC
+  // ========================
+  if (selectedMode == MODE_SUDDEN_DEATH) {
+    if (activeIndex == -1 && now - lastTriggerTime > cooldown) {
+      activeIndex = random(12);
+      setLED(activeIndex, true);
+    }
+
+    for (int i = 0; i < 12; i++) {
+      if (digitalRead(buttonPins[i]) == LOW) {
+        if (i == activeIndex) {
+          setLED(activeIndex, false);
+          activeIndex = -1;
+          score++;
+          lastTriggerTime = now;
+          updateScoreDisplay();
+          delay(200);
+        } else endGame();
+      }
+    }
+
+  } else if (selectedMode == MODE_SEQUENCE) {
+    handleSequenceMode();
+
+  } else { // Timed modes
+    if (activeIndex == -1 && now - lastTriggerTime > cooldown) {
+      activeIndex = random(12);
+      setLED(activeIndex, true);
+    }
+    if (activeIndex != -1 && digitalRead(buttonPins[activeIndex]) == LOW) {
+      setLED(activeIndex, false);
+      activeIndex = -1;
+      score++;
+      lastTriggerTime = now;
+      updateScoreDisplay();
+      delay(200);
+    }
+  }
+}
+
+// ========================
+// GAME CONTROL
+// ========================
+void startGame() {
+  playing = true;
+  score = 0;
+  activeIndex = -1;
+  gameStartTime = millis();
+  Serial.println("\n>> Game Started");
+
+  clearAllLEDs();
+
+  if (selectedMode == MODE_SEQUENCE) {
+    sequenceIndex = 1;
+    generateSequence();
+    showSequence();
+    waitingForInput = true;
+    playerStep = 0;
+  }
+  updateScoreDisplay();
+}
+
+void endGame() {
+  playing = false;
+  Serial.println(">> Game Over");
+  Serial.print("Score: "); Serial.println(score);
+
+  if (score > highScore) {
+    highScore = score;
+    EEPROM.write(0, highScore & 0xFF);
+    EEPROM.write(1, (highScore >> 8) & 0xFF);
+    Serial.println(">> NEW HIGH SCORE!");
+  }
+
+  clearAllLEDs();
+  showStandbyScreen();
+}
+
+// ========================
+// DISPLAY HELPERS
+// ========================
+void updateScoreDisplay() { Serial.print("Score: "); Serial.println(score); }
+
+void showStandbyScreen() {
+  Serial.println("\n======= Standby =======");
+  Serial.print("High Score: "); Serial.println(highScore);
+  Serial.println("Press:");
+  Serial.println("  Button 1 → 30s");
+  Serial.println("  Button 2 → 60s");
+  Serial.println("  Button 3 → Sudden Death");
+  Serial.println("  Button 4 → Sequence Mode");
+  Serial.println("=======================");
+}
+
+// ========================
+// SHIFT REGISTER HELPERS
+// ========================
+byte ledState = 0; // for 8 LEDs in shift register
+
+void setLED(int index, bool state) {
+  if (index < 8) { // shift register
+    if (state) ledState |= (1 << index);
+    else ledState &= ~(1 << index);
+    updateShiftRegister();
+  } else { // direct LEDs (index 8–11)
+    digitalWrite(directLEDs[index - 8], state ? HIGH : LOW);
+  }
+}
+
+void clearAllLEDs() {
+  ledState = 0;
+  updateShiftRegister();
+  for (int i = 0; i < 4; i++) digitalWrite(directLEDs[i], LOW);
+}
+
+void updateShiftRegister() {
+  digitalWrite(latchPin, LOW);
+  shiftOut(dataPin, clockPin, MSBFIRST, ledState);
+  digitalWrite(latchPin, HIGH);
+}
+
+// ========================
+// SEQUENCE MODE FUNCTIONS
+// ========================
+void generateSequence() {
+  for (int i = 0; i < maxSequenceLength; i++)
+    sequence[i] = random(12);
+}
+
+void showSequence() {
+  Serial.println(">> Showing sequence:");
+  for (int i = 0; i < sequenceIndex; i++) {
+    Serial.print("LED "); Serial.println(sequence[i]);
+    setLED(sequence[i], true);
+    delay(500);
+    setLED(sequence[i], false);
+    delay(300);
+  }
+}
+
+void handleSequenceMode() {
+  if (!waitingForInput) {
+    delay(500);
+    sequenceIndex++;
+    if (sequenceIndex > maxSequenceLength) { endGame(); return; }
+    showSequence();
+    waitingForInput = true;
+    playerStep = 0;
+    return;
+  }
+
+  for (int i = 0; i < 12; i++) {
+    if (digitalRead(buttonPins[i]) == LOW) {
+      if (i == sequence[playerStep]) {
+        setLED(i, true); delay(300); setLED(i, false);
+        playerStep++;
+        if (playerStep >= sequenceIndex) {
+          score++; updateScoreDisplay();
+          waitingForInput = false;
+        }
+      } else endGame();
+      delay(30);
+      break;
+    }
+  }
+}
+
+
+
+      //Before Uploading:
+//In the Arduino IDE, go to Tools → Serial Monitor
+//Make sure the baud rate is 9600
