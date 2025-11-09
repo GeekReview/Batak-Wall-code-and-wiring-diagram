@@ -5,9 +5,9 @@
 // ========================
 
 // Shift register pins
-const int dataPin  = 4;  // SER
-const int clockPin = 5;  // SRCLK
-const int latchPin = 6;  // RCLK
+const int dataPin  = 4;  // DS
+const int clockPin = 5;  // SH_CP
+const int latchPin = 6;  // ST_CP
 
 // Direct LEDs pins (4 LEDs)
 const int directLEDs[4] = {7, 8, 9, 10};
